@@ -19,7 +19,7 @@ def db():
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, nickname TEXT NOT NULL, wx_openid TEXT UNIQUE, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS books (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, title TEXT NOT NULL, exam TEXT NOT NULL, subject TEXT NOT NULL, want TEXT NOT NULL, quality TEXT NOT NULL, status TEXT NOT NULL, cover_media_id TEXT, file_media_id TEXT, created_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS exchanges (id TEXT PRIMARY KEY, book_id TEXT NOT NULL, requester_id TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS exchanges (id TEXT PRIMARY KEY, book_id TEXT NOT NULL, requester_id TEXT NOT NULL, status TEXT NOT NULL, trade_book_id TEXT, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, exchange_id TEXT NOT NULL, status TEXT NOT NULL, pickup_code TEXT, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS media (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, filename TEXT NOT NULL, path TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, created_at TEXT NOT NULL);
     """)
@@ -29,6 +29,8 @@ def db():
     bcols={r[1] for r in conn.execute("PRAGMA table_info(books)").fetchall()}
     if "cover_media_id" not in bcols: conn.execute("ALTER TABLE books ADD COLUMN cover_media_id TEXT")
     if "file_media_id" not in bcols: conn.execute("ALTER TABLE books ADD COLUMN file_media_id TEXT")
+    ecols={r[1] for r in conn.execute("PRAGMA table_info(exchanges)").fetchall()}
+    if "trade_book_id" not in ecols: conn.execute("ALTER TABLE exchanges ADD COLUMN trade_book_id TEXT")
     return conn
 
 def b64url(value): return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
@@ -81,11 +83,11 @@ class API(BaseHTTPRequestHandler):
         if path == "/api/auth/status": return self.out({"configured":bool(os.environ.get("WECHAT_APP_ID") and os.environ.get("WECHAT_APP_SECRET") and JWT_SECRET),"wechat_configured":bool(os.environ.get("WECHAT_APP_ID") and os.environ.get("WECHAT_APP_SECRET")),"jwt_configured":bool(JWT_SECRET),"require_auth":REQUIRE_AUTH})
         if path == "/api/books":
             owner=urllib.parse.parse_qs(urlparse(self.path).query).get("owner",[None])[0]
-            cols="b.*, c.filename AS cover_name, c.mime AS cover_mime, f.filename AS file_name, f.mime AS file_mime"
+            cols="b.*, c.filename AS cover_name, c.mime AS cover_mime, f.filename AS file_name, f.mime AS file_mime, u.nickname AS owner_nickname"
             if owner and self.valid_id(owner):
-                rows=conn.execute(f"SELECT {cols} FROM books b LEFT JOIN media c ON b.cover_media_id=c.id LEFT JOIN media f ON b.file_media_id=f.id WHERE b.owner_id=? ORDER BY b.created_at DESC",(owner,)).fetchall()
+                rows=conn.execute(f"SELECT {cols} FROM books b LEFT JOIN media c ON b.cover_media_id=c.id LEFT JOIN media f ON b.file_media_id=f.id LEFT JOIN users u ON b.owner_id=u.id WHERE b.owner_id=? ORDER BY b.created_at DESC",(owner,)).fetchall()
             else:
-                rows=conn.execute(f"SELECT {cols} FROM books b LEFT JOIN media c ON b.cover_media_id=c.id LEFT JOIN media f ON b.file_media_id=f.id WHERE b.status='active' ORDER BY b.created_at DESC").fetchall()
+                rows=conn.execute(f"SELECT {cols} FROM books b LEFT JOIN media c ON b.cover_media_id=c.id LEFT JOIN media f ON b.file_media_id=f.id LEFT JOIN users u ON b.owner_id=u.id WHERE b.status='active' ORDER BY b.created_at DESC").fetchall()
             return self.out([dict(x) for x in rows])
         if path == "/api/orders":
             owner=urllib.parse.parse_qs(urlparse(self.path).query).get("mine",[None])[0]
@@ -152,6 +154,7 @@ class API(BaseHTTPRequestHandler):
             if not self.require_user(data.get("owner_id")): return self.out({"error":"auth_required"},401)
             if any(len(str(data[k]))>200 for k in required if k != "owner_id"): return self.out({"error":"field_too_long"},400)
             cover=str(data.get("cover_media_id") or "").strip(); file_mid=str(data.get("file_media_id") or "").strip()
+            if not file_mid: return self.out({"error":"file_required","hint":"发布资料必须携带资料文件"},400)
             if cover and not self.valid_id(cover): return self.out({"error":"invalid_cover_media_id"},400)
             if file_mid and not self.valid_id(file_mid): return self.out({"error":"invalid_file_media_id"},400)
             status="active" if not os.environ.get("ADMIN_API_KEY") else "pending"
@@ -176,7 +179,9 @@ class API(BaseHTTPRequestHandler):
         if path == "/api/exchanges":
             if not data.get("book_id") or not data.get("requester_id"): return self.out({"error":"missing_field"},400)
             if not self.require_user(data.get("requester_id")): return self.out({"error":"auth_required"},401)
-            eid=str(uuid.uuid4()); conn.execute("INSERT INTO exchanges VALUES (?,?,?,?,?)",(eid,data["book_id"],data["requester_id"],"pending",now())); oid=str(uuid.uuid4()); conn.execute("INSERT INTO orders VALUES (?,?,?,?,?)",(oid,eid,"waiting_confirm",str(uuid.uuid4())[:4].upper(),now())); conn.commit(); return self.out({"exchange_id":eid,"order_id":oid,"status":"waiting_confirm"},201)
+            trade=str(data.get("trade_book_id") or "").strip()
+            if trade and not self.valid_id(trade): return self.out({"error":"invalid_trade_book_id"},400)
+            eid=str(uuid.uuid4()); conn.execute("INSERT INTO exchanges(id,book_id,requester_id,status,trade_book_id,created_at) VALUES (?,?,?,?,?,?)",(eid,data["book_id"],data["requester_id"],"pending",trade or None,now())); oid=str(uuid.uuid4()); conn.execute("INSERT INTO orders VALUES (?,?,?,?,?)",(oid,eid,"waiting_confirm",str(uuid.uuid4())[:4].upper(),now())); conn.commit(); return self.out({"exchange_id":eid,"order_id":oid,"status":"waiting_confirm"},201)
         if path.startswith("/api/orders/") and path.endswith("/status"):
             oid=path.split("/")[3]; target=data.get("status"); allowed={"waiting_confirm":"confirmed","confirmed":"completed","waiting_ship":"completed","shipping":"completed","waiting_pickup":"completed"}; row=conn.execute("SELECT status FROM orders WHERE id=?",(oid,)).fetchone()
             if not row:return self.out({"error":"order_not_found"},404)
