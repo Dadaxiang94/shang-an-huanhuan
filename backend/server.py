@@ -9,7 +9,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shang_an_huanhuan.sqlite3")
 UPLOADS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
 MAX_UPLOAD = 20 * 1024 * 1024  # 本地演示放宽到 20MB，容纳带图 PPT；生产请收紧并按类型限制
-ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "http://127.0.0.1:8000")
+ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "*")  # 本地演示默认放开 CORS；生产环境请设置为正式前端域名
 JWT_SECRET = os.environ.get("JWT_SECRET", "")
 REQUIRE_AUTH = os.environ.get("REQUIRE_AUTH", "false").lower() == "true"
 
